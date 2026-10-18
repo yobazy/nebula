@@ -17,7 +17,7 @@ use nebula_core::{
     MAX_CLOUD_PROMPT_BYTES,
 };
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -145,7 +145,7 @@ pub struct Daemon {
     // 3. Session install/removal touches `session_interest` before
     //    `sessions`; exit handling removes from `sessions` before clearing
     //    `session_interest`. No code may hold either while awaiting.
-    // 4. Status/relocation state (`pending_moves`, `status_machines`,
+    // 4. Status/relocation state (`pending_moves`, `pending_archives`, `status_machines`,
     //    `last_cwd`, `resumes`, `finished_runs`, `transcripts`) is taken
     //    one lock at a time. When a status update needs relocation state,
     //    read `pending_moves`, drop it, then take `status_machines`.
@@ -154,7 +154,7 @@ pub struct Daemon {
     // are not held across daemon-map locks except under the operation gates
     // above. Keep SQLite work out of async workers with `store_blocking`.
     sessions: Mutex<HashMap<SessionRef, Arc<PtySession>>>,
-    status_machines: Mutex<HashMap<AgentId, AgentStatusMachine>>,
+    pub(crate) status_machines: Mutex<HashMap<AgentId, AgentStatusMachine>>,
     pub hook_env: HookEnv,
     /// Shared with the hook HTTP server, which reads agent rows to decide
     /// auto-title injection.
@@ -201,6 +201,10 @@ pub struct Daemon {
     /// the old checkout's cwd can't drag the row back in the meantime.
     /// A user's mid-turn `move_agent` waits here too.
     pending_moves: Mutex<HashMap<AgentId, PendingMove>>,
+    /// Agents that ran `nebula archive` and are waiting for their turn to
+    /// end. Drained by `complete_pending_archive` on the turn-end hook,
+    /// cleared by any other archive, delete or spawn of the agent.
+    pub(crate) pending_archives: Mutex<HashSet<AgentId>>,
     /// Serializes the check-and-spawn inside [`Daemon::ensure_session`].
     /// Attach (the request loop) and the worktree prewarm sweep (its own
     /// task) can both reach for the same dead session; without this they
@@ -250,6 +254,7 @@ impl Daemon {
             last_cwd: Mutex::new(HashMap::new()),
             transcripts: Mutex::new(HashMap::new()),
             pending_moves: Mutex::new(HashMap::new()),
+            pending_archives: Mutex::new(HashSet::new()),
             spawn_gate: Mutex::new(()),
             prewarm_sweep: Mutex::new(None),
             resumes: Mutex::new(HashMap::new()),
@@ -516,6 +521,7 @@ fn agent_spawn_command_with(
             first.push(crate::sibling::CLAUDE_SPAWN_GUIDANCE.to_string());
             first.push(crate::sibling::CLAUDE_SESSION_CONTEXT_GUIDANCE.to_string());
             first.push(crate::open_files::CLAUDE_OPEN_GUIDANCE.to_string());
+            first.push(crate::archive_self::CLAUDE_ARCHIVE_GUIDANCE.to_string());
         }
         if let Some(prompt) = additional_system_prompt {
             first.push(prompt.to_string());
@@ -541,7 +547,7 @@ fn agent_spawn_command_with(
 }
 
 /// One system-prompt flag carrying nebula's guidance (worktree, spawn,
-/// then open) and whatever else the launch adds (the PR scope).
+/// open, then archive) and whatever else the launch adds (the PR scope).
 fn push_system_prompt(
     args: &mut Vec<String>,
     flag: &str,
@@ -554,6 +560,7 @@ fn push_system_prompt(
         system_prompt.push(crate::sibling::CLAUDE_SPAWN_GUIDANCE);
         system_prompt.push(crate::sibling::CLAUDE_SESSION_CONTEXT_GUIDANCE);
         system_prompt.push(crate::open_files::CLAUDE_OPEN_GUIDANCE);
+        system_prompt.push(crate::archive_self::CLAUDE_ARCHIVE_GUIDANCE);
     }
     if let Some(prompt) = additional {
         system_prompt.push(prompt);
@@ -920,6 +927,7 @@ mod tests {
                     crate::sibling::CLAUDE_SPAWN_GUIDANCE,
                     crate::sibling::CLAUDE_SESSION_CONTEXT_GUIDANCE,
                     crate::open_files::CLAUDE_OPEN_GUIDANCE,
+                    crate::archive_self::CLAUDE_ARCHIVE_GUIDANCE,
                 ]
                 .join("\n\n"),
             ])
@@ -1761,6 +1769,7 @@ mod tests {
         assert!(prompts[0].contains(CLAUDE_WORKTREE_GUIDANCE));
         assert!(prompts[0].contains(crate::sibling::CLAUDE_SPAWN_GUIDANCE));
         assert!(prompts[0].contains(crate::open_files::CLAUDE_OPEN_GUIDANCE));
+        assert!(prompts[0].contains(crate::archive_self::CLAUDE_ARCHIVE_GUIDANCE));
         assert!(prompts[0].contains("All work in this session must be scoped"));
         assert!(prompts[0].contains(pr_url));
         assert!(prompts[0].contains("/w/nebula-worktrees/fix"));
@@ -2981,6 +2990,80 @@ mod tests {
             .unwrap();
         assert_eq!(again.id, target.id);
         assert_eq!(outcome, EnterOutcome::AlreadyThere);
+    }
+
+    fn is_archived(daemon: &Daemon, id: &str) -> bool {
+        daemon
+            .store
+            .get_agent(&AgentId(id.into()))
+            .unwrap()
+            .unwrap()
+            .archived
+    }
+
+    /// `nebula archive` mid-turn waits for the turn to end: a tool hook from
+    /// the same turn leaves the session running, the Stop archives it.
+    #[test]
+    fn nebula_archive_waits_for_the_turn_to_end() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "root", "/nebula-test/p", true);
+        seed_agent(&daemon, "a1", "root", Some("s1"));
+        let a1 = AgentId("a1".into());
+        daemon.apply_hook_event(&a1, HookEvent::UserPromptSubmit, Some("s1".into()));
+
+        daemon.archive_after_turn(&a1).unwrap();
+        assert!(!is_archived(&daemon, "a1"), "not before the turn ends");
+        assert_eq!(daemon.pending_archives(), std::slice::from_ref(&a1));
+
+        daemon.complete_pending_archive(
+            &a1,
+            &HookEvent::PostToolUse {
+                tool_name: Some("Bash".into()),
+                subagent_id: None,
+            },
+        );
+        assert!(!is_archived(&daemon, "a1"), "a tool hook is not a turn end");
+
+        daemon.complete_pending_archive(&a1, &HookEvent::Stop);
+        assert!(is_archived(&daemon, "a1"));
+        assert!(daemon.pending_archives().is_empty());
+        assert!(
+            daemon.archive_after_turn(&a1).is_err(),
+            "an archived session says so"
+        );
+    }
+
+    /// With no turn under way there is no reply to wait for.
+    #[test]
+    fn nebula_archive_outside_a_turn_archives_at_once() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "root", "/nebula-test/p", true);
+        seed_agent(&daemon, "a1", "root", Some("s1"));
+        let a1 = AgentId("a1".into());
+
+        daemon.archive_after_turn(&a1).unwrap();
+        assert!(is_archived(&daemon, "a1"));
+        assert!(daemon.pending_archives().is_empty());
+    }
+
+    /// A user archiving (or deleting) the session first leaves nothing for
+    /// the turn end to do.
+    #[test]
+    fn archiving_by_hand_drops_a_pending_nebula_archive() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "root", "/nebula-test/p", true);
+        seed_agent(&daemon, "a1", "root", Some("s1"));
+        let a1 = AgentId("a1".into());
+        daemon.apply_hook_event(&a1, HookEvent::UserPromptSubmit, Some("s1".into()));
+        daemon.archive_after_turn(&a1).unwrap();
+
+        daemon.archive_agent(&a1).unwrap();
+        daemon.unarchive_agent(&a1).unwrap();
+        daemon.complete_pending_archive(&a1, &HookEvent::Stop);
+        assert!(!is_archived(&daemon, "a1"), "the unarchive stands");
     }
 
     /// Between `nebula worktree` and the turn's Stop the row already sits

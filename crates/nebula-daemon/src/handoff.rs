@@ -106,6 +106,8 @@ struct State {
     sessions: Vec<CarriedSession>,
     #[serde(default)]
     pending_moves: Vec<CarriedPendingMove>,
+    #[serde(default)]
+    pending_archives: Vec<AgentId>,
 }
 
 /// The running image's handles a restart passes on.
@@ -130,6 +132,7 @@ pub struct Carry {
     pub nonce: String,
     pub sessions: Vec<CarriedSession>,
     pub pending_moves: Vec<(AgentId, Worktree, bool)>,
+    pub pending_archives: Vec<AgentId>,
 }
 
 impl Carry {
@@ -206,6 +209,7 @@ pub fn restart(daemon: &Arc<Daemon>, handles: &Handles, request: &Request) -> Re
             .into_iter()
             .map(|(agent, target, notice)| CarriedPendingMove::new(agent, target, notice))
             .collect(),
+        pending_archives: daemon.pending_archives(),
     };
     let state_path = paths::restart_state_path();
     let kept = [state.pidfile_fd, state.socket_fd, state.hook_fd];
@@ -298,6 +302,7 @@ pub fn inherit(state_path: &Path) -> Result<Inherited> {
                 .into_iter()
                 .map(CarriedPendingMove::into_parts)
                 .collect(),
+            pending_archives: state.pending_archives,
         },
     })
 }
@@ -456,10 +461,12 @@ mod tests {
                 launching: true,
             }],
             pending_moves: vec![],
+            pending_archives: vec![AgentId("a1".into())],
         };
         let bytes = rmp_serde::to_vec_named(&state).unwrap();
         let back: State = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back.hook_token, "tok");
+        assert_eq!(back.pending_archives, [AgentId("a1".into())]);
         let pty = &back.sessions[0].pty;
         assert_eq!((pty.master_fd, pty.pid, pty.size), (9, 1234, (120, 40)));
         assert_eq!(
@@ -509,6 +516,7 @@ mod tests {
                 },
             ],
             pending_moves: vec![],
+            pending_archives: vec![],
         };
         assert_eq!(
             carry.agents(),

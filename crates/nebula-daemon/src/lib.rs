@@ -1,3 +1,4 @@
+pub mod archive_self;
 pub mod attach;
 pub mod claude_bg;
 pub mod config;
@@ -139,6 +140,7 @@ async fn serve(opts: DaemonOpts) -> Result<()> {
     if let Some(carry) = carry {
         let sessions = daemon.adopt_sessions(carry.sessions);
         daemon.restore_pending_moves(carry.pending_moves);
+        daemon.restore_pending_archives(carry.pending_archives);
         tracing::info!(sessions, "restarted in place");
         handoff::report(&carry.nonce, Ok(sessions));
     }
@@ -223,6 +225,8 @@ async fn serve(opts: DaemonOpts) -> Result<()> {
                 // still carries the old checkout's cwd, which must be seen
                 // (and ignored) while the relocation is still pending.
                 daemon.complete_pending_move(&agent_id, &event);
+                // A `nebula archive` waits for the same turn end.
+                daemon.complete_pending_archive(&agent_id, &event);
             }
         });
     }

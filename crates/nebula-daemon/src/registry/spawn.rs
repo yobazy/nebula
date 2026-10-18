@@ -405,6 +405,7 @@ impl Daemon {
         // Whatever spawns this agent, it runs in `worktree` from here: a
         // relocation still pending for it has been overtaken.
         self.pending_moves.lock().remove(&agent.id);
+        self.pending_archives.lock().remove(&agent.id);
         // Every row resolves its registry descriptor once, up front: a row
         // whose entry was deleted or broken since refuses the boot with
         // its reason rather than launching the wrong CLI, and the same

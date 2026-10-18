@@ -159,15 +159,7 @@ impl Daemon {
     /// silent respawn, a failed one, nothing left to respawn — lets the
     /// held end finish the turn after all.
     pub fn complete_pending_move(self: &Arc<Self>, id: &AgentId, event: &HookEvent) {
-        let turn_over = match event {
-            HookEvent::Stop => true,
-            HookEvent::Notification { notification_type } => {
-                notification_type.as_deref() == Some("idle_prompt")
-            }
-            HookEvent::Progress { busy } => !busy,
-            _ => false,
-        };
-        if !turn_over {
+        if !crate::archive_self::ends_turn(event) {
             return;
         }
         let Some(PendingMove { target, notice }) = self.pending_moves.lock().remove(id) else {
@@ -415,6 +407,7 @@ impl Daemon {
     }
 
     pub fn archive_agent(self: &Arc<Self>, id: &AgentId) -> Result<()> {
+        self.pending_archives.lock().remove(id);
         self.kill_session(&SessionRef::Agent(id.clone()));
         self.store.set_agent_archived(id, true)?;
         self.broadcast_agent(id)?;
@@ -442,6 +435,7 @@ impl Daemon {
         self.kill_session(&SessionRef::Agent(id.clone()));
         self.last_cwd.lock().remove(id);
         self.pending_moves.lock().remove(id);
+        self.pending_archives.lock().remove(id);
         self.store.delete_agent(id)?;
         self.broadcast(ServerEvent::EntityRemoved {
             id: EntityId::Agent(id.clone()),

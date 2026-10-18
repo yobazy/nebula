@@ -99,7 +99,7 @@ The ISSUES MODAL (`i`) is the same idea for GitHub issues: the TUI lists the sel
 
 | Crate | Role |
 |---|---|
-| `nebula` | Thin CLI: no args → TUI; `add`, `daemon`, `kill`, `reload`, `rename`, `worktree`, `spawn`, `open`, `config`, `browser`, `ssh`, `tunnel`, `upgrade` |
+| `nebula` | Thin CLI: no args → TUI; `add`, `daemon`, `kill`, `reload`, `rename`, `worktree`, `spawn`, `open`, `archive`, `config`, `browser`, `ssh`, `tunnel`, `upgrade` |
 | `nebula-core` | Shared protocol, entities, IDs, paths, codec |
 | `nebula-daemon` | PTYs, SQLite, git, hook receiver, status engine |
 | `nebula-tui` | ratatui UI, keyboard/mouse, attach/scrollback |

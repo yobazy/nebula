@@ -10,7 +10,7 @@ use std::path::PathBuf;
 ///
 /// Bump on every protocol change. Additive changes keep
 /// [`MIN_COMPATIBLE_PROTOCOL`] where it is; breaking changes bump both.
-pub const PROTOCOL_VERSION: u32 = 50;
+pub const PROTOCOL_VERSION: u32 = 51;
 
 /// Oldest IPC protocol this build can safely talk to.
 ///
@@ -383,6 +383,15 @@ pub enum ClientRequest {
     },
     /// Kills the PTY, sets archived=1.
     ArchiveAgent {
+        req_id: u64,
+        id: AgentId,
+    },
+    /// `nebula archive`, run by the agent from inside its own session:
+    /// archive it — as `ArchiveAgent` does — once its current turn ends, so
+    /// the reply it is writing reaches the user first. A session not
+    /// mid-turn is archived at once. Answered with `Ack`; the archived row
+    /// reaches every subscriber as an ordinary `EntityUpserted`.
+    ArchiveAgentAfterTurn {
         req_id: u64,
         id: AgentId,
     },
