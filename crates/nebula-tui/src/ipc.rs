@@ -421,6 +421,35 @@ pub async fn spawn_sibling_for_current_agent(
     Ok(())
 }
 
+/// CLI: `nebula archive` from inside an agent session — ask the daemon to
+/// archive this session once the current turn ends, so the reply the model
+/// is writing still reaches the user. Never spawns a daemon: no daemon
+/// means no session to archive. What this prints is read by the model that
+/// ran it.
+pub async fn archive_current_agent() -> Result<()> {
+    let agent_id = current_agent_id("archive")?;
+    let sock = paths::socket_path();
+    let Ok(stream) = try_connect(&sock).await else {
+        bail!("no nebula daemon is running — nothing archived");
+    };
+    let mut conn = handshake(stream).await?;
+    let req_id = ONE_SHOT_REQ_ID;
+    write_frame(
+        &mut conn.stream,
+        &ClientRequest::ArchiveAgentAfterTurn {
+            req_id,
+            id: AgentId(agent_id),
+        },
+    )
+    .await?;
+    await_ack(&mut conn, req_id).await?;
+    println!(
+        "this session will be archived as soon as this turn ends. Finish your reply now — say in \
+         one line that it is being archived — and make no further tool calls."
+    );
+    Ok(())
+}
+
 /// CLI: `nebula open <file>…` from inside an agent session — resolve the
 /// paths here, where the cwd is the agent's, and hand them to the daemon,
 /// which raises every attached TUI's FILE TABS on them. Never spawns a

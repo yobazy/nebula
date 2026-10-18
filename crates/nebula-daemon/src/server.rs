@@ -527,6 +527,13 @@ impl ClientConnection {
                 reply_done(&self.out_tx, req_id, result).await;
                 Ok(true)
             }
+            ClientRequest::ArchiveAgentAfterTurn { req_id, id } => {
+                let result = self
+                    .blocking_daemon(move |daemon| daemon.archive_after_turn(&id))
+                    .await;
+                reply_done(&self.out_tx, req_id, result).await;
+                Ok(true)
+            }
             ClientRequest::UnarchiveAgent { req_id, id } => {
                 let result = self
                     .blocking_daemon(move |daemon| daemon.unarchive_agent(&id))

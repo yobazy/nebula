@@ -19,6 +19,7 @@ nebula rename <title>       title the session this runs inside          (agents 
 nebula worktree [name]      move this session into a worktree           (agents run this)
 nebula spawn <task>         start another agent session beside it       (agents run this)
 nebula open <file>…         show files/images/diagrams in file tabs     (agents run this)
+nebula archive              archive this session once its turn ends     (agents run this)
 nebula sessions             list every session across every project     (agents run this)
 nebula read <session>       read recent context from another session    (agents run this)
 nebula ask <session> <q>    ask another session and print its answer    (agents run this)
@@ -82,6 +83,11 @@ nebula open <file>…       # show the files in this nebula's FILE TABS — a mo
                           # when you ask to see a file, image, mockup or diagram; text files,
                           # supported local images and Mermaid diagrams render inline, other
                           # binaries are refused and the agent names the path instead)
+nebula archive            # archive this session as soon as its current turn ends, so the agent's
+                          # reply still reaches you first; its process stops and its card leaves
+                          # the grid, as the TUI's archive does (agents run this only when you ask
+                          # them to archive or close the session; a session not mid-turn is
+                          # archived at once)
 nebula sessions [--json]  # list every session across every project: id, name, project, worktree
                           # branch/path, harness, status and one-line recent summary. Agents run
                           # this when you name another session and they need an exact id.

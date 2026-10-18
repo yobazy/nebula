@@ -101,6 +101,12 @@ pub fn run_open(files: Vec<String>) -> Result<()> {
     runtime()?.block_on(ipc::open_files_for_current_agent(&files))
 }
 
+/// `nebula archive` — archive the current agent session when its turn ends
+/// (see `ipc::archive_current_agent`).
+pub fn run_archive() -> Result<()> {
+    runtime()?.block_on(ipc::archive_current_agent())
+}
+
 /// `nebula spawn "<task>" [--kind <kind>] [--worktree <branch> [--base
 /// <ref>]]` — start a new agent session beside the current one, or in
 /// another worktree of its project (see

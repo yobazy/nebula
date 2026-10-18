@@ -4346,6 +4346,61 @@ async fn nebula_open_cli_hands_the_files_to_every_subscriber() {
     wait_for_exit(&mut daemon);
 }
 
+/// `nebula archive` from inside a session, end to end over real processes:
+/// the CLI (what the model runs) asks the daemon, and a session with no
+/// turn under way — this stub CLI never fires a hook — is archived at once
+/// and reaches every subscriber archived. The wait for a turn's end is the
+/// daemon's own tests' business. Outside a session there is nothing to
+/// archive.
+#[tokio::test]
+async fn nebula_archive_cli_archives_the_session_it_runs_in() {
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let script = env.tmp.path().join("agent.sh");
+    std::fs::write(&script, "#!/bin/sh\nexec sleep 600\n").unwrap();
+    make_executable(&script);
+    let mut daemon = env.spawn_daemon_with_agent_cmd(script.to_str().unwrap());
+
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    let agent_id = create_agent_get_id(&mut c, &worktree.id, "agent-1", 2).await;
+
+    let out = agent_cli(&env, &agent_id, &["archive"]);
+    assert!(out.status.success(), "archive failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("will be archived"), "stdout: {stdout}");
+
+    read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter().any(|e| {
+            matches!(e, ServerEvent::EntityUpserted { entity: Entity::Agent(a) }
+                if a.id == agent_id && a.archived)
+        })
+    })
+    .await;
+
+    // Archived already, the second ask is refused.
+    let out = agent_cli(&env, &agent_id, &["archive"]);
+    assert!(!out.status.success(), "a second archive must fail: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("already archived"), "stderr: {stderr}");
+
+    // Outside a session there is no row to archive.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nebula"))
+        .arg("archive")
+        .env(env::RUNTIME_DIR, &env.runtime_dir)
+        .env_remove(env::AGENT_ID)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "outside a session must fail: {out:?}"
+    );
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
 /// `nebula worktree <name>` from inside a session, end to end over real
 /// processes: the CLI (what the model runs) creates the checkout in nebula's
 /// sibling layout and re-homes the row at once; the live PTY is left alone

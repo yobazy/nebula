@@ -31,8 +31,8 @@ use clap::{Parser, Subcommand};
         Agents keep running after the TUI quits, and their scrollback is replayed \
         when you come back.\n\n\
         A bare `nebula` opens the TUI. The commands below drive the same tree from \
-        a shell; `rename`, `worktree`, `spawn` and `open` are the ones an agent \
-        runs on your behalf from inside a session.",
+        a shell; `rename`, `worktree`, `spawn`, `open` and `archive` are the ones an \
+        agent runs on your behalf from inside a session.",
     after_help = ROOT_EXAMPLES
 )]
 pub(crate) struct Cli {
@@ -209,6 +209,16 @@ pub(crate) enum Command {
         #[arg(required = true, num_args = 1.., value_name = "FILE")]
         files: Vec<String>,
     },
+    /// Archive this session once its current turn ends.
+    ///
+    /// Run from inside a nebula agent session; agents run it only when you
+    /// ask them to archive or close the session, never unprompted. The
+    /// session finishes the reply it is writing, then is archived as the
+    /// TUI's archive does: its process stops and its card leaves the grid,
+    /// and you can unarchive it. A session that is not mid-turn is archived
+    /// at once.
+    #[command(after_help = ARCHIVE_EXAMPLES)]
+    Archive,
     /// List every session across every project.
     ///
     /// Prints the session id/name, project, worktree branch, harness, status
@@ -504,6 +514,10 @@ Examples:
   nebula open README.md                one tab
   nebula open mockup.png flow.mmd      image and diagram previews
   nebula open src/main.rs docs/keys.md a tab each, in this order";
+
+const ARCHIVE_EXAMPLES: &str = "\
+Examples:
+  nebula archive                       archive this session after this turn";
 
 const SESSIONS_EXAMPLES: &str = "\
 Examples:
