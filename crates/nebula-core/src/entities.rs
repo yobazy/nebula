@@ -147,6 +147,12 @@ pub struct Project {
     pub name: String,
     pub repo_path: PathBuf,
     pub sort_order: i64,
+    /// A PLAIN FOLDER project: `repo_path` is a folder outside any git
+    /// repository (`AddProject::plain_folder`). It has one root row, the
+    /// folder itself, with an empty branch; worktrees, branches and pull
+    /// requests do not apply to it.
+    #[serde(default)]
+    pub plain_folder: bool,
 }
 
 impl Project {
