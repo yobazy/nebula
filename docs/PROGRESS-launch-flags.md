@@ -8,7 +8,9 @@ native plan mode and Home as a plain folder):
 2. `AddProject.plain_folder`: a client can register a folder that is not a git repo as a project,
    so a session can run there without `git init`.
 
-Branch `ov/f-nebula-flags`, pushed as `launch-flags`. Draft PR against `main`.
+Branch `ov/f-nebula-flags`, pushed as `launch-flags`. Draft PR: https://github.com/yobazy/nebula/pull/1
+(on the fork; a bare `gh pr create` picks the `upstream` remote AgentSystemLabs/nebula, so it was
+opened with `--repo yobazy/nebula`).
 
 ## Plan / status
 
