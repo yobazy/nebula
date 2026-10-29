@@ -743,12 +743,14 @@ impl Daemon {
                     .await
                     .with_context(|| format!("create {}", path.display()))?;
             }
-            // Inside a repository (or git present and unsure): the repo
-            // rule below. Outside one, or with no git at all, the folder
-            // is what the client asked for.
-            match git::repo_toplevel(path).await {
-                Ok(_) => {}
-                Err(_) => return self.add_plain_folder(path, name),
+            // Inside a repository: the repo rule below. A `.git` in the
+            // folder or above it counts even when git itself fails to
+            // answer (a locked index, git missing), so a hiccup never turns
+            // a repository into a plain folder; that failure is reported by
+            // the repo rule instead.
+            let has_dot_git = path.ancestors().any(|d| d.join(".git").exists());
+            if !has_dot_git && git::repo_toplevel(path).await.is_err() {
+                return self.add_plain_folder(path, name);
             }
         } else if create_missing {
             if !path.exists() {

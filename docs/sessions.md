@@ -637,3 +637,27 @@ whole diff, `Ctrl+o` — or a click on the `↗ open in browser` button pinned r
 frame — opens it in the browser and marks it read on the way out, and `Esc` closes the
 modal (twice, with a filter typed). The hotkey is
 rebindable (`pull_requests`).
+
+## LAUNCH FLAGS and PLAIN FOLDER projects (for other clients)
+
+Two protocol fields exist for clients that drive the DAEMON over its socket, such as Observatory.
+The TUI sends neither yet.
+
+**LAUNCH FLAGS** (`CreateAgent::launch_flags`) are extra CLI flags for a fresh session, as argv
+words: `["--permission-mode", "plan"]` starts Claude in its native plan mode. The DAEMON checks them
+against a per-harness allowlist (`crates/nebula-core/src/launch_flags.rs`) before anything spawns and
+refuses the create with a reason when a word is not on it. Claude takes `--permission-mode` with
+`plan`, `acceptEdits`, `auto`, `manual` or `default`; `bypassPermissions` and `dontAsk` are refused,
+so a client cannot start a session that skips its permission prompts. `--flag=value` is accepted and
+normalized to two words. Every other harness takes no launch flags yet. The words reach the CLI as
+their own arguments, after the model and effort and before the system prompt and the first prompt,
+and never as shell text. They apply to the first spawn only: a restart or RESUME boots without them,
+so a plan the user already approved is not entered again. A create with launch flags never adopts a
+PREWARM POOL spare, which booted without them.
+
+**PLAIN FOLDER projects** (`AddProject::plain_folder`) let a session run in a folder that is not a git
+repository, without `git init`. The project gets one root row for the folder, with no branch (the
+grid calls it `folder`), and `Project::plain_folder` is set so a client can hide what needs git. The
+worktree sync leaves it alone; creating a worktree or a PR SESSION in it is refused with "is a plain
+folder, not a git repository". With `create_missing` too, a missing folder is created, still without
+git. A path inside a repository is added as that repository whether the flag is set or not.
