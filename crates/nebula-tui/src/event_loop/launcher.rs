@@ -2910,6 +2910,7 @@ mod tests {
                     name: "web".into(),
                     repo_path: "/tmp/web".into(),
                     sort_order: 1,
+                    plain_folder: false,
                 }),
             },
         );
@@ -6883,6 +6884,7 @@ mod tests {
                     name: "docs".into(),
                     repo_path: "/tmp/docs".into(),
                     sort_order: 2,
+                    plain_folder: false,
                 }),
             },
         );
@@ -8120,6 +8122,7 @@ mod tests {
                 name: "away".into(),
                 repo_path: "/tmp/away".into(),
                 sort_order: 2,
+                plain_folder: false,
             });
             draw(&mut app);
             let tabs = app.launcher_tabs.clone();
