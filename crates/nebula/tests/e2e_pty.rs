@@ -2756,7 +2756,10 @@ async fn plain_folder_project_runs_claude_with_launch_flags() {
     );
     let text = std::fs::read_to_string(&settings).unwrap();
     assert!(text.contains("hookEvent=Stop"), "{text}");
-    assert!(!home.join(".claude").exists(), "nothing written into the folder");
+    assert!(
+        !home.join(".claude").exists(),
+        "nothing written into the folder"
+    );
 
     write_frame(
         &mut c,

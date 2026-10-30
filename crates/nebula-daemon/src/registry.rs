@@ -2605,8 +2605,7 @@ impl Daemon {
         let install_result = match harness.hook_dialect() {
             Some(AgentKind::Claude) => match &plain_folder_settings {
                 Some(dir) => hooks::installer::install_claude_hooks_outside(dir).map(|path| {
-                    settings_flag =
-                        vec!["--settings".into(), path.to_string_lossy().into_owned()];
+                    settings_flag = vec!["--settings".into(), path.to_string_lossy().into_owned()];
                 }),
                 None => hooks::installer::install_claude_hooks(&worktree.path),
             },
