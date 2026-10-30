@@ -4781,6 +4781,16 @@ fn fmt_mem(bytes: u64) -> String {
     }
 }
 
+/// What a checkout's rule and pane tab call it: its branch, or `folder`
+/// for a PLAIN FOLDER project's root row, which has none.
+pub fn checkout_label(branch: &str) -> &str {
+    if branch.is_empty() {
+        "folder"
+    } else {
+        branch
+    }
+}
+
 /// Clip `s` to `max` chars, spending the last one on `…` when it had to
 /// cut. Counts chars, not columns — wide glyphs are the caller's problem.
 /// The one clipper for every row, title and grep hit, so they all cut the

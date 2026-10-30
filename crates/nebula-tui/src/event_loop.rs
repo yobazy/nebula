@@ -3787,6 +3787,7 @@ fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequ
             path,
             name: None,
             create_missing: false,
+            plain_folder: false,
         }
     });
 }
@@ -7008,6 +7009,7 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
                     path,
                     name: None,
                     create_missing: true,
+                    plain_folder: false,
                 }
             });
         }
@@ -8612,6 +8614,7 @@ fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec<ClientRequ
             cloud_prompt,
             starting_prompt,
             issue_url,
+            launch_flags: Vec::new(),
         },
     });
     // The create consumes (or, off-spec, discards) the worktree's warm
@@ -11875,6 +11878,7 @@ mod tests {
                     name: "demo".into(),
                     repo_path: "/tmp/demo".into(),
                     sort_order: 0,
+                    plain_folder: false,
                 }),
             },
         );
@@ -11929,6 +11933,7 @@ mod tests {
                     name: "demo".into(),
                     repo_path: dir.to_path_buf(),
                     sort_order: 0,
+                    plain_folder: false,
                 }),
             },
         );
@@ -12347,6 +12352,7 @@ mod tests {
                     name: "other".into(),
                     repo_path: "/tmp/other".into(),
                     sort_order: 1,
+                    plain_folder: false,
                 }),
             },
         );
@@ -14695,6 +14701,7 @@ diff --git a/docs/keys.md b/docs/keys.md
                     name: "other".into(),
                     repo_path: "/tmp/other".into(),
                     sort_order: 1,
+                    plain_folder: false,
                 }),
             },
         );
@@ -20334,6 +20341,7 @@ diff --git a/src/c.rs b/src/c.rs
             name: name.into(),
             repo_path: format!("/tmp/{name}").into(),
             sort_order,
+            plain_folder: false,
         })
     }
 
@@ -21329,6 +21337,7 @@ diff --git a/src/c.rs b/src/c.rs
                     name: "demo".into(),
                     repo_path: path.to_path_buf(),
                     sort_order: 0,
+                    plain_folder: false,
                 }),
             },
         );
@@ -22261,6 +22270,7 @@ diff --git a/src/c.rs b/src/c.rs
                     name: "nebula".into(),
                     repo_path: "/tmp/nebula".into(),
                     sort_order: 1,
+                    plain_folder: false,
                 }),
             },
         );
@@ -22920,6 +22930,7 @@ diff --git a/src/c.rs b/src/c.rs
                     name: "demo".into(),
                     repo_path: "/tmp/demo".into(),
                     sort_order: 0,
+                    plain_folder: false,
                 }),
             },
         );
@@ -23000,6 +23011,7 @@ diff --git a/src/c.rs b/src/c.rs
                     name: "fresh".into(),
                     repo_path: "/tmp/fresh".into(),
                     sort_order: 9,
+                    plain_folder: false,
                 }),
             },
         );
@@ -25897,6 +25909,7 @@ diff --git a/src/c.rs b/src/c.rs
                     name: "secret".into(),
                     repo_path: "/tmp/secret".into(),
                     sort_order: 9,
+                    plain_folder: false,
                 }),
             },
         );
@@ -28025,6 +28038,7 @@ diff --git a/src/c.rs b/src/c.rs
                         name: "other".into(),
                         repo_path: "/tmp/other".into(),
                         sort_order: 1,
+                        plain_folder: false,
                     }),
                 },
             );
