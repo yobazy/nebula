@@ -661,3 +661,10 @@ grid calls it `folder`), and `Project::plain_folder` is set so a client can hide
 worktree sync leaves it alone; creating a worktree or a PR SESSION in it is refused with "is a plain
 folder, not a git repository". With `create_missing` too, a missing folder is created, still without
 git. A path inside a repository is added as that repository whether the flag is set or not.
+
+A Claude session in a PLAIN FOLDER does not get nebula's MANAGED HOOKS in `<folder>/.claude/`. The
+folder can be your own (a Home that is `~` itself would make that file your global
+`~/.claude/settings.local.json`), so the hooks and allow rules go into a file nebula owns instead,
+`plain-folders/<project id>/claude-settings.json` in the DATA DIR, and every spawn in the folder
+passes it to Claude with `--settings`. Removing the project removes that file. Other harnesses still
+write their hook files into the folder.
