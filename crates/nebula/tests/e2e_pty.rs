@@ -2737,6 +2737,27 @@ async fn plain_folder_project_runs_claude_with_launch_flags() {
     assert_eq!(words.get(at + 1), Some(&"plan"), "{words:?}");
     assert_eq!(words.last(), Some(&"Plan the move"), "{words:?}");
 
+    // The hooks live in nebula's data dir, loaded with `--settings`; the
+    // folder (which may be the user's real home) gets no `.claude/`.
+    let at = words
+        .iter()
+        .position(|w| *w == "--settings")
+        .unwrap_or_else(|| panic!("no --settings in {words:?}"));
+    let settings = env
+        .tmp
+        .path()
+        .join("data/plain-folders")
+        .join(project_id.to_string())
+        .join("claude-settings.json");
+    assert_eq!(
+        words.get(at + 1).map(std::path::Path::new),
+        Some(settings.as_path()),
+        "{words:?}"
+    );
+    let text = std::fs::read_to_string(&settings).unwrap();
+    assert!(text.contains("hookEvent=Stop"), "{text}");
+    assert!(!home.join(".claude").exists(), "nothing written into the folder");
+
     write_frame(
         &mut c,
         &ClientRequest::CreateWorktree {
@@ -2755,6 +2776,20 @@ async fn plain_folder_project_runs_claude_with_launch_flags() {
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
+
+    // Removing the project takes nebula's settings file with it.
+    write_frame(
+        &mut c,
+        &ClientRequest::RemoveProject {
+            req_id: 5,
+            id: project_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 5).is_some()).await;
+    assert!(!settings.exists(), "the settings file outlived its project");
+    assert!(home.is_dir(), "the folder itself stays");
 
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);

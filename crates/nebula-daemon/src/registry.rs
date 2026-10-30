@@ -899,8 +899,17 @@ impl Daemon {
             .map(|w| w.id)
             .collect();
         self.kill_sessions_in(&wt_ids, &agents, &terminals);
+        let plain_folder = self.store.get_project(id)?.is_some_and(|p| p.plain_folder);
         // Removing a project only forgets it in nebula — never touches disk.
         self.store.delete_project(id)?;
+        // ...beyond nebula's own data dir: a PLAIN FOLDER's settings file.
+        if plain_folder {
+            let dir = hooks::installer::plain_folder_settings_dir(
+                &nebula_core::paths::data_dir(),
+                &id.to_string(),
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
         self.broadcast(ServerEvent::EntityRemoved {
             id: EntityId::Project(id.clone()),
         });
@@ -2571,13 +2580,36 @@ impl Daemon {
         // its reason rather than launching the wrong CLI, and the same
         // descriptor picks the hook dialect below.
         let harness = resolve_harness(agent.kind, agent.custom_harness.as_deref())?;
+        // A PLAIN FOLDER may be the user's own folder (even `~`), so a
+        // Claude session there loads nebula's hooks from a nebula-owned
+        // settings file via `--settings` instead of the folder's `.claude/`.
+        let plain_folder_settings = if agent.kind == AgentKind::Claude && cloud_task.is_none() {
+            self.store
+                .get_project(&worktree.project_id)?
+                .filter(|p| p.plain_folder)
+                .map(|p| {
+                    hooks::installer::plain_folder_settings_dir(
+                        &nebula_core::paths::data_dir(),
+                        &p.id.to_string(),
+                    )
+                })
+        } else {
+            None
+        };
+        let mut settings_flag: Vec<String> = Vec::new();
         // Managed status hooks; a failure here degrades to "no status
         // updates", never blocks the spawn. The dialect is data: a custom
         // harness naming one reports status, prompts and permission waits
         // exactly like that harness, and a harness with none runs
         // hookless (process-based status until a dialect is mapped).
         let install_result = match harness.hook_dialect() {
-            Some(AgentKind::Claude) => hooks::installer::install_claude_hooks(&worktree.path),
+            Some(AgentKind::Claude) => match &plain_folder_settings {
+                Some(dir) => hooks::installer::install_claude_hooks_outside(dir).map(|path| {
+                    settings_flag =
+                        vec!["--settings".into(), path.to_string_lossy().into_owned()];
+                }),
+                None => hooks::installer::install_claude_hooks(&worktree.path),
+            },
             // Codex's hooks live in its home, not the worktree, so one
             // trust approval covers every worktree (see installer docs);
             // any per-worktree copy an older nebula left is pruned.
@@ -2703,7 +2735,9 @@ impl Daemon {
                 prompts.initial.as_deref(),
                 prompts.system.as_deref(),
                 true,
-                launch_flags,
+                // The settings file rides every spawn (a restart or resume
+                // needs its hooks too); the launch flags only the first.
+                &[launch_flags, &settings_flag[..]].concat(),
             ),
         };
         // Run the agent through the user's login+interactive shell so it sees
