@@ -100,8 +100,68 @@ is a temp one on its own socket.
 2. Is the allowlist right? Currently `--permission-mode` with plan / acceptEdits / auto / manual /
    default, Claude only. Add more flags (for example `--add-dir`) or other harnesses
    (Codex `--sandbox`) only when Observatory needs them.
-3. Plain folders still get nebula's managed hooks written into `<folder>/.claude/settings.local.json`,
-   like any project. If Observatory's Home is your real home folder, that file is
-   `~/.claude/settings.local.json`. Decide whether that's OK or whether Home should be a subfolder.
+3. ~~Plain folders still get nebula's managed hooks written into `<folder>/.claude/settings.local.json`.~~
+   Done (decision 30B, 2026-10-30): Claude's hooks for a plain folder live in nebula's data dir.
+   Cursor and custom harnesses still write into the folder; see the section below.
 4. The TUI has no way to add a plain folder yet (it still offers `git init`). Add one if you want it.
 5. `e2e_tui` has two tests broken on main (stale `^q: sessions` footer text). Worth a separate fix.
+
+## Decisions applied 2026-10-30
+
+Run `nebula` on 2026-10-30, worktree branch `ov/nebula`, pushed to `launch-flags`.
+
+- **29A, keep the allowlist tight.** No change: Claude takes only `--permission-mode` (plan,
+  acceptEdits, auto, manual, default); `bypassPermissions` and `dontAsk` stay refused.
+- **30B, hooks for a plain-folder Home go to a subfolder, not the user's folder.** Changed.
+  - Location: `<nebula data dir>/plain-folders/<project id>/claude-settings.json`
+    (`~/.local/share/nebula/...` on Linux, `~/Library/Application Support/dev.nebula.nebula/...`
+    on macOS). Why there: it is a folder nebula already owns, so nothing lands in the user's folder
+    (if Home is `~`, the old path was the user's global `~/.claude/settings.local.json`); it is per
+    project, so two plain folders never share a file; and `NEBULA_DATA_DIR` isolates it in tests and
+    parallel daemons like every other nebula file. A subfolder inside Home (e.g. `Home/.nebula/`)
+    was rejected because it would still write into the user's folder and Claude would not read it
+    without `--settings` anyway.
+  - How Claude finds it: every Claude spawn in a plain folder (first spawn, restart, resume,
+    prewarm) passes `--settings <file>`. Claude merges hooks and `permissions.allow` from that file
+    with the user's own settings, so user settings are untouched. The launch flags still apply to
+    the first spawn only; `--settings` rides every spawn.
+  - The file is rewritten (strip and rebuild nebula's groups) on every spawn, like the worktree
+    copy, and `RemoveProject` deletes its folder. Repo projects are unchanged.
+  - Code: `hooks::installer::{plain_folder_settings_dir, install_claude_hooks_outside}`,
+    `Daemon::spawn_agent_pty`, `Daemon::remove_project`. Docs: end of `docs/sessions.md`.
+  - Tests: `plain_folder_hooks_stay_out_of_the_folder` (installer unit test: same hooks and allow
+    rules as a worktree, folder untouched, reinstall idempotent) and the e2e
+    `plain_folder_project_runs_claude_with_launch_flags`, extended to check the stub `claude`
+    receives `--settings <data dir>/plain-folders/<id>/claude-settings.json`, the file holds the
+    hooks, `<folder>/.claude` does not exist, and removing the project deletes the file.
+  - Left as is: Cursor sessions in a plain folder still write `<folder>/.cursor/hooks.json` and
+    `.cursor/rules/nebula-title.mdc` (cursor-agent has no `--settings` equivalent), and a custom
+    harness using the Claude hook dialect still writes `<folder>/.claude/settings.local.json`
+    (its program may not accept `--settings`). Observatory only starts Claude there today.
+- **31A, leave the TUI as is.** No change: the TUI still cannot add a plain folder.
+- **32A, the PR stays on the fork.** No change: https://github.com/yobazy/nebula/pull/1.
+- **3A, sentence case everywhere.** The new copy (docs paragraph, comments) has no all-caps
+  letter-spaced labels. The capitalised words in `docs/sessions.md` (PLAIN FOLDER, DATA DIR, MANAGED
+  HOOKS) are the repo's existing glossary-term convention, not labels, so they were kept.
+
+Checks run (all on this machine, temp daemons only; the installed nebula daemon and binary were
+not touched):
+
+- `cargo test -p nebula-core -p nebula-daemon -p nebula-tui --no-fail-fast`: 43 + 320 + 1266 passed.
+- `cargo test -p nebula --test e2e_pty`: 32 passed.
+- `cargo fmt --check`: clean. `cargo clippy --workspace --all-targets`: 11 warnings, all in files
+  this branch does not touch (lifecycle.rs, pty/kitty.rs, nebula-tui event_loop/markdown/ui).
+- `e2e_tui` not rerun; its two known failures on main are unrelated.
+
+Try it:
+
+```sh
+cargo test -p nebula-daemon --lib -- plain_folder
+cargo test -p nebula --test e2e_pty plain_folder
+```
+
+### Needs Bazil (2026-10-30)
+
+1. Merge the PR, cut a release, and repin Observatory's `nebula-core` (protocol 45), as before.
+2. Cursor in a plain folder still writes `.cursor/` into the folder. Fine while Observatory only
+   runs Claude there; say if it should run hookless or refuse instead.
