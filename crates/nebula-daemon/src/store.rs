@@ -328,6 +328,12 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE temp.worktree_home;
     DROP TABLE temp.worktree_merge;
     ",
+    // 29: PLAIN FOLDER projects (`AddProject::plain_folder`): a folder
+    // outside any git repository, registered without `git init`. Every
+    // project before this one is a repository.
+    "
+    ALTER TABLE projects ADD COLUMN plain_folder INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 pub struct Store {
@@ -398,8 +404,16 @@ impl Store {
 
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO projects (id, name, repo_path, sort_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![p.id.as_str(), p.name, p.repo_path.to_string_lossy(), p.sort_order, now_ms()],
+            "INSERT INTO projects (id, name, repo_path, sort_order, created_at, plain_folder)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                p.id.as_str(),
+                p.name,
+                p.repo_path.to_string_lossy(),
+                p.sort_order,
+                now_ms(),
+                p.plain_folder as i64
+            ],
         )?;
         Ok(())
     }
@@ -1047,7 +1061,7 @@ impl Store {
 // on which path fetched it. The column order is the mapper's contract.
 
 // Column orders the `row_to_*` mappers below read.
-const PROJECT_COLUMNS: &str = "id, name, repo_path, sort_order";
+const PROJECT_COLUMNS: &str = "id, name, repo_path, sort_order, plain_folder";
 const WORKTREE_COLUMNS: &str = "id, project_id, path, branch, is_main, sort_order";
 const AGENT_COLUMNS: &str = "id, worktree_id, name, status, archived, kind, \
                              claude_session_id, sort_order, status_changed_at, model, effort, \
@@ -1062,6 +1076,7 @@ fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
         name: r.get(1)?,
         repo_path: PathBuf::from(r.get::<_, String>(2)?),
         sort_order: r.get(3)?,
+        plain_folder: r.get::<_, i64>(4)? != 0,
     })
 }
 
@@ -1165,6 +1180,7 @@ mod tests {
             name: "demo".into(),
             repo_path: "/tmp/demo".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         let worktree = Worktree {
@@ -1361,6 +1377,7 @@ mod tests {
             name: "demo".into(),
             repo_path: "/tmp/demo".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         let worktree = Worktree {
@@ -1629,6 +1646,7 @@ mod tests {
             name: "p".into(),
             repo_path: PathBuf::from("/tmp/p"),
             sort_order: 1,
+            plain_folder: false,
         };
         assert!(store.insert_project(&dup).is_err());
 
@@ -1783,6 +1801,7 @@ mod tests {
             name: "p".into(),
             repo_path: "/tmp/p".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         let wt = Worktree {
@@ -1868,6 +1887,7 @@ mod tests {
             name: "p".into(),
             repo_path: "/tmp/p".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         let wt = Worktree {
@@ -1957,6 +1977,7 @@ mod tests {
             name: "demo".into(),
             repo_path: "/tmp/demo".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         let worktree = Worktree {
@@ -1994,6 +2015,7 @@ mod tests {
             name: "p".into(),
             repo_path: "/tmp/p".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         let wt = Worktree {
@@ -2062,6 +2084,7 @@ mod tests {
             name: "p".into(),
             repo_path: "/tmp/p".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         let wt = Worktree {
@@ -2124,6 +2147,7 @@ mod tests {
             name: "demo".into(),
             repo_path: "/tmp/demo".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         let worktree = Worktree {
@@ -2222,6 +2246,7 @@ mod tests {
             name: "p".into(),
             repo_path: "/tmp/p".into(),
             sort_order: 0,
+            plain_folder: false,
         };
         store.insert_project(&project).unwrap();
         store

@@ -515,6 +515,7 @@ pub async fn add_project(path: &str) -> Result<()> {
             path: dir.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await?;

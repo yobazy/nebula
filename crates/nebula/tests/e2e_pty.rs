@@ -285,6 +285,7 @@ async fn full_crud_attach_and_restart_persistence() {
             path: repo.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -460,6 +461,7 @@ async fn full_crud_attach_and_restart_persistence() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -620,6 +622,7 @@ async fn kitty_keyboard_negotiation_passthrough() {
             path: repo.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -854,6 +857,7 @@ async fn hook_post_from_agent_pty_drives_status() {
             path: repo.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -893,6 +897,7 @@ async fn hook_post_from_agent_pty_drives_status() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -1161,6 +1166,7 @@ async fn hook_cwd_rehomes_agent_to_other_worktree() {
             path: repo.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -1232,6 +1238,7 @@ async fn hook_cwd_rehomes_agent_to_other_worktree() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -1320,6 +1327,7 @@ async fn claude_session_title_and_row_name_stay_tied() {
             path: repo.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -1360,6 +1368,7 @@ async fn claude_session_title_and_row_name_stay_tied() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -1525,6 +1534,7 @@ async fn restart_rebinds_an_attached_client_to_the_new_pty() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -1622,6 +1632,7 @@ async fn codex_hooks_install_and_drive_status() {
             path: repo.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -1661,6 +1672,7 @@ async fn codex_hooks_install_and_drive_status() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -1820,6 +1832,7 @@ async fn external_worktrees_are_adopted_and_dropped() {
             path: repo.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -1947,6 +1960,7 @@ async fn upgrade_shuts_down_idle_daemon_but_spares_live_sessions() {
             path: repo.clone(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -2320,6 +2334,7 @@ async fn reload_keeps_an_agent_of_every_harness() {
                 cloud_prompt: None,
                 starting_prompt: None,
                 issue_url: None,
+                launch_flags: Vec::new(),
             },
         )
         .await
@@ -2494,6 +2509,7 @@ async fn add_project_creates_missing_dir_and_inits() {
             path: new_dir.clone(),
             name: None,
             create_missing: true,
+            plain_folder: false,
         },
     )
     .await
@@ -2522,6 +2538,7 @@ async fn add_project_creates_missing_dir_and_inits() {
                 path: plain_dir.clone(),
                 name: None,
                 create_missing,
+                plain_folder: false,
             },
         )
         .await
@@ -2557,6 +2574,230 @@ async fn add_project_creates_missing_dir_and_inits() {
     wait_for_exit(&mut daemon);
 }
 
+/// What Observatory needs from one socket: a PLAIN FOLDER project (no
+/// `git init`) whose root row runs a real Claude spawn with LAUNCH FLAGS.
+/// A stub `claude` records its argv, so the test sees `--permission-mode
+/// plan` reach the CLI as its own words; a flag off the allowlist and a
+/// worktree on the folder are refused with a reason.
+#[tokio::test]
+async fn plain_folder_project_runs_claude_with_launch_flags() {
+    let env = TestEnv::new();
+    let argv_file = env.tmp.path().join("claude-argv.txt");
+    let bin = env.tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("claude");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 60\n",
+            argv_file.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&stub);
+    let shell = env.tmp.path().join("seeing-shell.sh");
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\nPATH={}:/usr/bin:/bin\nexport PATH\nexec /bin/sh -c \"$4\"\n",
+            bin.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&shell);
+    let mut daemon = env.spawn_daemon_with_shell(&shell);
+
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    write_frame(&mut c, &ClientRequest::Subscribe)
+        .await
+        .unwrap();
+    read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::Snapshot { .. }))
+    })
+    .await;
+
+    let home = env.tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    write_frame(
+        &mut c,
+        &ClientRequest::AddProject {
+            req_id: 1,
+            path: home.clone(),
+            name: Some("Home".into()),
+            create_missing: false,
+            plain_folder: true,
+        },
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        find_ack(evs, 1).is_some()
+            && evs.iter().any(|e| {
+                matches!(
+                    e,
+                    ServerEvent::EntityUpserted {
+                        entity: Entity::Worktree(w)
+                    } if w.is_main
+                )
+            })
+    })
+    .await;
+    let Some(ServerEvent::Ack {
+        created: Some(EntityId::Project(project_id)),
+        ..
+    }) = find_ack(&events, 1)
+    else {
+        panic!("AddProject with plain_folder failed: {events:#?}");
+    };
+    let project_id = project_id.clone();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ServerEvent::EntityUpserted { entity: Entity::Project(p) }
+                if p.id == project_id && p.plain_folder
+        )),
+        "the project row says it is a plain folder: {events:#?}"
+    );
+    let root = events
+        .iter()
+        .find_map(|e| match e {
+            ServerEvent::EntityUpserted {
+                entity: Entity::Worktree(w),
+            } if w.is_main => Some(w.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(root.branch, "", "a plain folder has no branch");
+    assert!(!home.join(".git").exists(), "nothing was git-inited");
+
+    let create = |req_id: u64, flags: &[&str]| ClientRequest::CreateAgent {
+        req_id,
+        worktree: root.id.clone(),
+        name: format!("agent-{req_id}"),
+        kind: AgentKind::Claude,
+        custom_harness: None,
+        model: None,
+        effort: None,
+        auto_title: false,
+        cloud_prompt: None,
+        starting_prompt: Some("Plan the move".into()),
+        issue_url: None,
+        launch_flags: flags.iter().map(|f| f.to_string()).collect(),
+    };
+
+    // Off the allowlist: refused before anything spawns.
+    write_frame(&mut c, &create(2, &["--dangerously-skip-permissions"]))
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 2).is_some()).await;
+    match find_ack(&events, 2) {
+        Some(ServerEvent::Error { message, .. }) => {
+            assert!(message.contains("not allowed"), "{message}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    write_frame(&mut c, &create(3, &["--permission-mode", "plan"]))
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, SPAWN_CHAIN_TIMEOUT, |evs| {
+        find_ack(evs, 3).is_some()
+    })
+    .await;
+    assert!(
+        matches!(
+            find_ack(&events, 3),
+            Some(ServerEvent::Ack {
+                created: Some(EntityId::Agent(_)),
+                ..
+            })
+        ),
+        "CreateAgent with plan mode in a plain folder failed: {events:#?}"
+    );
+    let deadline = tokio::time::Instant::now() + SPAWN_CHAIN_TIMEOUT;
+    let argv = loop {
+        if let Ok(text) = std::fs::read_to_string(&argv_file) {
+            if text.ends_with("Plan the move\n") {
+                break text;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stub claude never recorded its argv"
+        );
+        tokio::time::sleep(POLL_STEP).await;
+    };
+    let words: Vec<&str> = argv.lines().collect();
+    let at = words
+        .iter()
+        .position(|w| *w == "--permission-mode")
+        .unwrap_or_else(|| panic!("no --permission-mode in {words:?}"));
+    assert_eq!(words.get(at + 1), Some(&"plan"), "{words:?}");
+    assert_eq!(words.last(), Some(&"Plan the move"), "{words:?}");
+
+    // The hooks live in nebula's data dir, loaded with `--settings`; the
+    // folder (which may be the user's real home) gets no `.claude/`.
+    let at = words
+        .iter()
+        .position(|w| *w == "--settings")
+        .unwrap_or_else(|| panic!("no --settings in {words:?}"));
+    let settings = env
+        .tmp
+        .path()
+        .join("data/plain-folders")
+        .join(project_id.to_string())
+        .join("claude-settings.json");
+    assert_eq!(
+        words.get(at + 1).map(std::path::Path::new),
+        Some(settings.as_path()),
+        "{words:?}"
+    );
+    let text = std::fs::read_to_string(&settings).unwrap();
+    assert!(text.contains("hookEvent=Stop"), "{text}");
+    assert!(
+        !home.join(".claude").exists(),
+        "nothing written into the folder"
+    );
+
+    write_frame(
+        &mut c,
+        &ClientRequest::CreateWorktree {
+            req_id: 4,
+            project: project_id.clone(),
+            branch: "feat".into(),
+            base: None,
+        },
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 4).is_some()).await;
+    match find_ack(&events, 4) {
+        Some(ServerEvent::Error { message, .. }) => {
+            assert!(message.contains("plain folder"), "{message}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    // Removing the project takes nebula's settings file with it.
+    write_frame(
+        &mut c,
+        &ClientRequest::RemoveProject {
+            req_id: 5,
+            id: project_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 5).is_some()).await;
+    assert!(!settings.exists(), "the settings file outlived its project");
+    assert!(home.is_dir(), "the folder itself stays");
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
 /// Subscribe + AddProject boilerplate; returns the main worktree row.
 async fn add_project_get_main_worktree(c: &mut UnixStream, repo: &Path) -> nebula_core::Worktree {
     write_frame(c, &ClientRequest::Subscribe).await.unwrap();
@@ -2572,6 +2813,7 @@ async fn add_project_get_main_worktree(c: &mut UnixStream, repo: &Path) -> nebul
             path: repo.to_path_buf(),
             name: None,
             create_missing: false,
+            plain_folder: false,
         },
     )
     .await
@@ -2662,6 +2904,7 @@ async fn prewarmed_session_is_adopted_by_create_agent() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -2810,6 +3053,7 @@ async fn dead_prewarm_falls_back_to_cold_spawn() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -2868,6 +3112,7 @@ async fn create_agent_refuses_when_the_cli_is_not_installed() {
                 cloud_prompt: None,
                 starting_prompt: None,
                 issue_url: None,
+                launch_flags: Vec::new(),
             },
         )
         .await
@@ -2955,6 +3200,7 @@ async fn create_agent_succeeds_when_the_cli_is_on_the_login_shell_path() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -3027,6 +3273,7 @@ async fn create_agent_get_id(
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -3196,6 +3443,7 @@ async fn archive_sigkills_an_agent_that_ignores_sighup() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -3336,6 +3584,7 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -3384,6 +3633,7 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -3501,6 +3751,7 @@ async fn prewarm_worktree_sessions_boots_nothing_when_switched_off() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -3645,6 +3896,7 @@ async fn idle_sessions_reap_unwatched_but_spare_busy_and_attached() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -3971,6 +4223,7 @@ async fn auto_title_instruction_and_rename_flow() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -4174,6 +4427,7 @@ async fn nebula_worktree_cli_relocates_the_session_when_the_turn_ends() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -4444,6 +4698,7 @@ async fn nebula_spawn_cli_starts_a_sibling_session_in_the_same_worktree() {
             cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await
@@ -4699,6 +4954,7 @@ exit 0
             cloud_prompt: Some("  Hello,\n  world  ".into()),
             starting_prompt: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         },
     )
     .await

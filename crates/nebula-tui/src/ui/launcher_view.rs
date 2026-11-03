@@ -7,10 +7,10 @@
 //! target row, its key hints) and the PROJECT PICKER.
 
 use super::{
-    ago_badge, below_first_row, centered_rect, empty_list_row, fit_ago, fuzzy_highlight_spans,
-    over_box_rect, render_modal_frame, render_row, row_rect, search_line, status_dot,
-    status_name_spans, sweep_ramp, truncate, visible_positions, NO_MATCHES, OVER_BOX_INSET,
-    PENDING_SESSION_BADGE,
+    ago_badge, below_first_row, centered_rect, checkout_label, empty_list_row, fit_ago,
+    fuzzy_highlight_spans, over_box_rect, render_modal_frame, render_row, row_rect, search_line,
+    status_dot, status_name_spans, sweep_ramp, truncate, visible_positions, NO_MATCHES,
+    OVER_BOX_INSET, PENDING_SESSION_BADGE,
 };
 use crate::app::{App, Focus, HitTarget, Overlay};
 use crate::launcher::{BoxField, Hidden, LauncherRow, ProjectPicker, ProjectTab, Tally};
@@ -1740,7 +1740,7 @@ fn draw_band_rule(
             change_labels(
                 n,
                 app.worktree_lines(&band.worktree),
-                band.branch.chars().count(),
+                checkout_label(&band.branch).chars().count(),
                 room.saturating_sub(glyph.chars().count()),
             )
         });
@@ -1751,7 +1751,7 @@ fn draw_band_rule(
             })
     });
     let branch = truncate(
-        &band.branch,
+        checkout_label(&band.branch),
         room.saturating_sub(glyph.chars().count() + taken),
     );
     // The rule's left end: `──` like every other band's, or the CURSOR
@@ -2926,7 +2926,7 @@ fn pane_title(app: &App, room: usize) -> Vec<PaneTab> {
         tabs.push(PaneTab::plain(vec![
             Span::styled(glyph, Style::default().fg(scope)),
             Span::styled(
-                truncate(&branch, (room / 4).max(8)),
+                truncate(checkout_label(&branch), (room / 4).max(8)),
                 Style::default().fg(scope),
             ),
         ]));
@@ -3754,6 +3754,7 @@ mod tests {
                 name: (*name).into(),
                 repo_path: format!("/tmp/{name}").into(),
                 sort_order: 0,
+                plain_folder: false,
             })
             .collect();
         app.tree.worktrees = (0..2)
@@ -4710,6 +4711,7 @@ mod tests {
                 name: format!("project-number-{i}"),
                 repo_path: format!("/tmp/p{i}").into(),
                 sort_order: 0,
+                plain_folder: false,
             });
         }
         // Every project open, `api` — the oldest opened — last.

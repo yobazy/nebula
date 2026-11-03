@@ -251,12 +251,13 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     path,
                     name,
                     create_missing,
+                    plain_folder,
                 } => {
                     reply(
                         &out_tx,
                         req_id,
                         daemon
-                            .add_project(&path, name, create_missing)
+                            .add_project_with(&path, name, create_missing, plain_folder)
                             .await
                             .map(Some),
                     )
@@ -320,6 +321,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     cloud_prompt,
                     starting_prompt,
                     issue_url,
+                    launch_flags,
                 } => {
                     // Logged by mode only — never the task, prompt text or
                     // issue URL.
@@ -327,6 +329,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         (Some(_), _, _) => Some("cloud"),
                         (None, _, Some(_)) => Some("issue"),
                         (None, Some(_), None) => Some("preset"),
+                        (None, None, None) if !launch_flags.is_empty() => Some("flags"),
                         (None, None, None) => None,
                     };
                     let result = daemon
@@ -342,6 +345,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             starting_prompt,
                             pr_url: None,
                             issue_url,
+                            launch_flags,
                         })
                         .await;
                     if let Some(launch_mode) = launch_mode {

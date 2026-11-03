@@ -5711,6 +5711,7 @@ mod tests {
                 name: (*name).into(),
                 repo_path: format!("/tmp/{name}").into(),
                 sort_order: 0,
+                plain_folder: false,
             })
             .collect();
         app.tree.worktrees = [("w0", "p0", true), ("w1", "p0", false), ("w2", "p1", true)]
@@ -5925,6 +5926,7 @@ mod tests {
             name: "demo".into(),
             repo_path: "/tmp/demo".into(),
             sort_order: 0,
+            plain_folder: false,
         });
         app.tree.worktrees.push(Worktree {
             id: worktree_id.clone(),
@@ -6227,6 +6229,7 @@ mod tests {
                 name: format!("p{p}"),
                 repo_path: format!("/tmp/p{p}").into(),
                 sort_order: p,
+                plain_folder: false,
             });
             for w in 0..3 {
                 tree.worktrees.push(Worktree {

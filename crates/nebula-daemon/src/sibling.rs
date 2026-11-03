@@ -86,6 +86,7 @@ impl Daemon {
             starting_prompt: Some(starting_prompt.to_string()),
             pr_url: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         })
     }
 
@@ -126,6 +127,7 @@ mod tests {
                 name: "p".into(),
                 repo_path: "/nebula-test/p".into(),
                 sort_order: 0,
+                plain_folder: false,
             })
             .unwrap();
         for (id, is_main) in [("root", true), ("feat", false)] {
