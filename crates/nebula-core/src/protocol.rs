@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 44;
+pub const PROTOCOL_VERSION: u32 = 45;
 
 /// Max IPC frame size (length prefix sanity bound).
 pub const MAX_FRAME_LEN: u32 = 4 * 1024 * 1024;
@@ -65,6 +65,17 @@ pub enum ClientRequest {
         /// inside a repository. Set only after the user confirmed in the
         /// client.
         create_missing: bool,
+        /// Register `path` as a PLAIN FOLDER project when it is not inside
+        /// a git repository: no `git init`, one root row for the folder
+        /// itself, and sessions run there like anywhere else. Worktrees,
+        /// branches and pull requests are refused for it, and the worktree
+        /// sync leaves it alone. A path inside a repository is still added
+        /// as that repository, flag or not. Wins over `create_missing`'s
+        /// `git init` (the directory is still created when missing). Set
+        /// only when the user asked for a folder without git; absent for
+        /// older clients, which keeps today's repo-only rule.
+        #[serde(default)]
+        plain_folder: bool,
     },
     RemoveProject {
         req_id: u64,
@@ -127,6 +138,17 @@ pub enum ClientRequest {
         /// since a spare booted bare never got it.
         #[serde(default)]
         issue_url: Option<String>,
+        /// LAUNCH FLAGS: extra CLI flags for this first spawn, as argv
+        /// words (`["--permission-mode", "plan"]` starts Claude in its
+        /// native plan mode). Checked against the harness's allowlist in
+        /// `nebula_core::launch_flags` and refused with a reason when any
+        /// word is not on it; never handed to a shell as text. Request-only
+        /// like `starting_prompt`: a RESUME or restart boots without them,
+        /// so a plan the user already approved is not re-entered. Skips
+        /// PREWARM POOL adoption, since a spare booted without them. Empty
+        /// (and absent, for older clients) = none.
+        #[serde(default)]
+        launch_flags: Vec<String>,
     },
     /// Create a local AGENT of any kind from an OPEN PRS row — a PR
     /// SESSION. It never runs in the ROOT WORKTREE: the daemon finds the
@@ -548,4 +570,136 @@ pub enum ServerEvent {
         session: SessionRef,
         tail: Option<OutputTail>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shapes a client built before LAUNCH FLAGS and PLAIN FOLDER
+    /// projects sends: the same variants, one field shorter each.
+    #[derive(Serialize)]
+    enum OldRequest {
+        AddProject {
+            req_id: u64,
+            path: PathBuf,
+            name: Option<String>,
+            create_missing: bool,
+        },
+        CreateAgent {
+            req_id: u64,
+            worktree: WorktreeId,
+            name: String,
+            kind: AgentKind,
+            custom_harness: Option<String>,
+            model: Option<String>,
+            effort: Option<String>,
+            auto_title: bool,
+            cloud_prompt: Option<String>,
+            starting_prompt: Option<String>,
+            issue_url: Option<String>,
+        },
+    }
+
+    fn decode(old: &OldRequest) -> ClientRequest {
+        let bytes = rmp_serde::to_vec(old).unwrap();
+        rmp_serde::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn requests_without_the_new_fields_still_decode() {
+        let add = decode(&OldRequest::AddProject {
+            req_id: 1,
+            path: "/tmp/p".into(),
+            name: None,
+            create_missing: false,
+        });
+        assert!(matches!(
+            add,
+            ClientRequest::AddProject {
+                req_id: 1,
+                plain_folder: false,
+                ..
+            }
+        ));
+        let create = decode(&OldRequest::CreateAgent {
+            req_id: 2,
+            worktree: WorktreeId("w".into()),
+            name: "a".into(),
+            kind: AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            auto_title: true,
+            cloud_prompt: None,
+            starting_prompt: None,
+            issue_url: None,
+        });
+        match create {
+            ClientRequest::CreateAgent {
+                req_id: 2,
+                launch_flags,
+                ..
+            } => assert!(launch_flags.is_empty()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// JSON without the new keys (how Observatory builds its requests
+    /// before they are framed) decodes too, and with them carries them.
+    #[test]
+    fn json_requests_take_the_new_keys_or_leave_them_out() {
+        let create: ClientRequest = serde_json::from_str(
+            r#"{"CreateAgent": {"req_id": 3, "worktree": "w", "name": "a", "kind": "claude",
+                "model": null, "effort": null, "auto_title": false}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            create,
+            ClientRequest::CreateAgent { launch_flags, .. } if launch_flags.is_empty()
+        ));
+        let plan: ClientRequest = serde_json::from_str(
+            r#"{"CreateAgent": {"req_id": 4, "worktree": "w", "name": "a", "kind": "claude",
+                "model": null, "effort": null, "auto_title": false,
+                "launch_flags": ["--permission-mode", "plan"]}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            plan,
+            ClientRequest::CreateAgent { launch_flags, .. }
+                if launch_flags == crate::launch_flags::plan_mode()
+        ));
+        let add: ClientRequest = serde_json::from_str(
+            r#"{"AddProject": {"req_id": 5, "path": "/tmp/home", "name": null,
+                "create_missing": false, "plain_folder": true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            add,
+            ClientRequest::AddProject {
+                plain_folder: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_project_from_before_plain_folders_decodes_as_a_repo() {
+        #[derive(Serialize)]
+        struct OldProject {
+            id: ProjectId,
+            name: String,
+            repo_path: PathBuf,
+            sort_order: i64,
+        }
+        let bytes = rmp_serde::to_vec(&OldProject {
+            id: ProjectId("p".into()),
+            name: "p".into(),
+            repo_path: "/tmp/p".into(),
+            sort_order: 0,
+        })
+        .unwrap();
+        let project: Project = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(!project.plain_folder);
+    }
 }

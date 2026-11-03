@@ -95,6 +95,9 @@ pub(crate) struct CreateAgentSpec {
     /// The GitHub issue an ISSUE SESSION was launched for (see
     /// `pr_scope::issue_rule`). Persisted like `pr_url`.
     pub issue_url: Option<String>,
+    /// LAUNCH FLAGS for the first spawn only, as the client sent them;
+    /// checked against `nebula_core::launch_flags` before anything spawns.
+    pub launch_flags: Vec<String>,
 }
 
 /// A pre-spawned agent CLI waiting to be adopted by the next CreateAgent for
@@ -719,7 +722,37 @@ impl Daemon {
         name: Option<String>,
         create_missing: bool,
     ) -> Result<EntityId> {
-        if create_missing {
+        self.add_project_with(path, name, create_missing, false)
+            .await
+    }
+
+    /// [`Self::add_project`], or with `plain_folder` a PLAIN FOLDER project
+    /// when `path` is outside any repository: the folder is created when
+    /// missing and `create_missing` says so, but never `git init`ed. A
+    /// path inside a repository is still that repository's project.
+    pub async fn add_project_with(
+        self: &Arc<Self>,
+        path: &Path,
+        name: Option<String>,
+        create_missing: bool,
+        plain_folder: bool,
+    ) -> Result<EntityId> {
+        if plain_folder {
+            if create_missing && !path.exists() {
+                tokio::fs::create_dir_all(path)
+                    .await
+                    .with_context(|| format!("create {}", path.display()))?;
+            }
+            // Inside a repository: the repo rule below. A `.git` in the
+            // folder or above it counts even when git itself fails to
+            // answer (a locked index, git missing), so a hiccup never turns
+            // a repository into a plain folder; that failure is reported by
+            // the repo rule instead.
+            let has_dot_git = path.ancestors().any(|d| d.join(".git").exists());
+            if !has_dot_git && git::repo_toplevel(path).await.is_err() {
+                return self.add_plain_folder(path, name);
+            }
+        } else if create_missing {
             if !path.exists() {
                 tokio::fs::create_dir_all(path)
                     .await
@@ -768,6 +801,7 @@ impl Daemon {
             name,
             repo_path: repo_path.clone(),
             sort_order: self.store.next_project_sort_order()?,
+            plain_folder: false,
         };
         self.store.insert_project(&project)?;
         self.broadcast(ServerEvent::EntityUpserted {
@@ -792,6 +826,48 @@ impl Daemon {
                 entity: Entity::Worktree(worktree),
             });
         }
+        Ok(EntityId::Project(project.id))
+    }
+
+    /// Register a folder outside any repository as a PLAIN FOLDER project:
+    /// one root row for the folder itself, with no branch. Refused when the
+    /// folder is missing, not a directory, or already a project.
+    fn add_plain_folder(self: &Arc<Self>, path: &Path, name: Option<String>) -> Result<EntityId> {
+        let folder = std::fs::canonicalize(path)
+            .with_context(|| format!("{} does not exist", path.display()))?;
+        if !folder.is_dir() {
+            bail!("{} is not a directory", folder.display());
+        }
+        if self.store.project_by_path(&folder)?.is_some() {
+            bail!("project already added: {}", folder.display());
+        }
+        let name = name
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| Project::folder_name(&folder));
+        let project = Project {
+            id: ProjectId::generate(),
+            name,
+            repo_path: folder.clone(),
+            sort_order: self.store.next_project_sort_order()?,
+            plain_folder: true,
+        };
+        self.store.insert_project(&project)?;
+        self.broadcast(ServerEvent::EntityUpserted {
+            entity: Entity::Project(project.clone()),
+        });
+        let worktree = Worktree {
+            id: WorktreeId::generate(),
+            project_id: project.id.clone(),
+            path: folder,
+            branch: String::new(),
+            is_main: true,
+            sort_order: 0,
+        };
+        self.store.insert_worktree(&worktree)?;
+        self.broadcast(ServerEvent::EntityUpserted {
+            entity: Entity::Worktree(worktree),
+        });
         Ok(EntityId::Project(project.id))
     }
 
@@ -823,8 +899,17 @@ impl Daemon {
             .map(|w| w.id)
             .collect();
         self.kill_sessions_in(&wt_ids, &agents, &terminals);
+        let plain_folder = self.store.get_project(id)?.is_some_and(|p| p.plain_folder);
         // Removing a project only forgets it in nebula — never touches disk.
         self.store.delete_project(id)?;
+        // ...beyond nebula's own data dir: a PLAIN FOLDER's settings file.
+        if plain_folder {
+            let dir = hooks::installer::plain_folder_settings_dir(
+                &nebula_core::paths::data_dir(),
+                &id.to_string(),
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
         self.broadcast(ServerEvent::EntityRemoved {
             id: EntityId::Project(id.clone()),
         });
@@ -847,6 +932,7 @@ impl Daemon {
             .store
             .get_project(project_id)?
             .context("project not found")?;
+        refuse_plain_folder(&project, "worktrees")?;
         // A base the caller named (`nebula worktree --base`) is resolved
         // against the fetched origin — `main` means `origin/main`, never
         // this checkout's local branch; every other new WORKTREE — `n` in
@@ -897,6 +983,7 @@ impl Daemon {
             .store
             .get_project(project_id)?
             .context("project not found")?;
+        refuse_plain_folder(&project, "pull request sessions")?;
         let (_, worktrees, _, _) = self.store.load_tree()?;
         if let Some(existing) = worktrees
             .into_iter()
@@ -1001,6 +1088,11 @@ impl Daemon {
     /// drops rows whose checkout vanished — except the main row and rows
     /// that still have sessions, which the user must delete deliberately.
     pub async fn sync_project_worktrees(self: &Arc<Self>, project: &Project) -> Result<()> {
+        // A PLAIN FOLDER has no `git worktree list` to follow: its one root
+        // row is the whole project, even once someone `git init`s it.
+        if project.plain_folder {
+            return Ok(());
+        }
         let adopted = {
             let _ops = self.worktree_ops.lock().await;
             self.reconcile_project_worktrees(project).await?
@@ -1104,6 +1196,7 @@ impl Daemon {
             starting_prompt,
             pr_url,
             issue_url,
+            launch_flags,
         } = spec;
         let cloud_prompt = match cloud_prompt {
             Some(_) if kind != AgentKind::Claude => {
@@ -1136,6 +1229,13 @@ impl Daemon {
             Some(url) => Some(crate::pr_scope::validate_issue_url(&url)?),
             None => None,
         };
+        // Allowlisted per harness, normalized to `--flag value` words; a
+        // custom harness has no allowlist, so any flag refuses it.
+        if !launch_flags.is_empty() && cloud_prompt.is_some() {
+            bail!("launch flags are not supported for Claude Cloud");
+        }
+        let launch_flags =
+            nebula_core::launch_flags::validate(kind, &launch_flags).map_err(anyhow::Error::msg)?;
         // Every harness resolves against the current registry before
         // anything spawns: a missing or broken entry refuses the create
         // with its reason, and a deleted entry breaks respawns the same
@@ -1160,11 +1260,12 @@ impl Daemon {
         // its pre-generated id — the CLI booted while the user typed the
         // name, so the create feels instant. A starting prompt rides the
         // CLI's argv, and a spare already booted bare cannot be handed one;
-        // neither can it be handed a PR or issue rule.
+        // neither can it be handed a PR or issue rule, or LAUNCH FLAGS.
         let adopted = (cloud_prompt.is_none()
             && pr_url.is_none()
             && issue_url.is_none()
-            && starting_prompt.is_none())
+            && starting_prompt.is_none()
+            && launch_flags.is_empty())
         .then(|| self.take_prewarmed(&worktree_id, kind, model.as_deref(), effort.as_deref()))
         .flatten();
         // Only the cold path needs asking: an adopted warm session is proof
@@ -1251,6 +1352,7 @@ impl Daemon {
                 DEFAULT_ROWS,
                 cloud_prompt.as_deref(),
                 starting_prompt.as_deref(),
+                &launch_flags,
             );
             self.rollback_agent_on_spawn_error(&agent.id, spawned)?;
         }
@@ -1759,6 +1861,7 @@ impl Daemon {
             DEFAULT_ROWS,
             None,
             prompt.as_deref(),
+            &[],
         );
         let continued = match spawned {
             Ok(_) => prompt.is_some(),
@@ -2408,7 +2511,7 @@ impl Daemon {
         cols: u16,
         rows: u16,
     ) -> Result<Arc<PtySession>> {
-        self.spawn_agent_session_with(agent, worktree, cols, rows, None, None)
+        self.spawn_agent_session_with(agent, worktree, cols, rows, None, None, &[])
     }
 
     /// The general spawn: `cloud_task` makes it a Claude Cloud dispatch
@@ -2420,6 +2523,9 @@ impl Daemon {
     /// persisted Agent fields — a Cloud row's `cloud_session_id` makes
     /// `restart_agent` and `ensure_session` refuse to boot a local CLI for
     /// it, everything else takes the plain local-session path.
+    /// `launch_flags` are a create's validated LAUNCH FLAGS, transient the
+    /// same way: only `create_agent` passes any.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_agent_session_with(
         self: &Arc<Self>,
         agent: &Agent,
@@ -2428,6 +2534,7 @@ impl Daemon {
         rows: u16,
         cloud_task: Option<&str>,
         initial_prompt: Option<&str>,
+        launch_flags: &[String],
     ) -> Result<Arc<PtySession>> {
         // A session the user sent to Claude's background (`/background`)
         // can't be resumed, only attached to — see `claude_bg`. The probe
@@ -2445,6 +2552,7 @@ impl Daemon {
             cloud_task,
             initial_prompt,
             attach.as_deref(),
+            launch_flags,
         )
     }
 
@@ -2462,6 +2570,7 @@ impl Daemon {
         cloud_task: Option<&str>,
         initial_prompt: Option<&str>,
         attach: Option<&str>,
+        launch_flags: &[String],
     ) -> Result<Arc<PtySession>> {
         // Whatever spawns this agent, it runs in `worktree` from here: a
         // relocation still pending for it has been overtaken.
@@ -2471,13 +2580,35 @@ impl Daemon {
         // its reason rather than launching the wrong CLI, and the same
         // descriptor picks the hook dialect below.
         let harness = resolve_harness(agent.kind, agent.custom_harness.as_deref())?;
+        // A PLAIN FOLDER may be the user's own folder (even `~`), so a
+        // Claude session there loads nebula's hooks from a nebula-owned
+        // settings file via `--settings` instead of the folder's `.claude/`.
+        let plain_folder_settings = if agent.kind == AgentKind::Claude && cloud_task.is_none() {
+            self.store
+                .get_project(&worktree.project_id)?
+                .filter(|p| p.plain_folder)
+                .map(|p| {
+                    hooks::installer::plain_folder_settings_dir(
+                        &nebula_core::paths::data_dir(),
+                        &p.id.to_string(),
+                    )
+                })
+        } else {
+            None
+        };
+        let mut settings_flag: Vec<String> = Vec::new();
         // Managed status hooks; a failure here degrades to "no status
         // updates", never blocks the spawn. The dialect is data: a custom
         // harness naming one reports status, prompts and permission waits
         // exactly like that harness, and a harness with none runs
         // hookless (process-based status until a dialect is mapped).
         let install_result = match harness.hook_dialect() {
-            Some(AgentKind::Claude) => hooks::installer::install_claude_hooks(&worktree.path),
+            Some(AgentKind::Claude) => match &plain_folder_settings {
+                Some(dir) => hooks::installer::install_claude_hooks_outside(dir).map(|path| {
+                    settings_flag = vec!["--settings".into(), path.to_string_lossy().into_owned()];
+                }),
+                None => hooks::installer::install_claude_hooks(&worktree.path),
+            },
             // Codex's hooks live in its home, not the worktree, so one
             // trust approval covers every worktree (see installer docs);
             // any per-worktree copy an older nebula left is pruned.
@@ -2593,7 +2724,7 @@ impl Daemon {
                     false,
                 )
             }
-            (None, None) => agent_spawn_command_with(
+            (None, None) => agent_spawn_command_flagged(
                 &harness,
                 agent.session_id.as_deref(),
                 Some(&worktree.path),
@@ -2603,6 +2734,9 @@ impl Daemon {
                 prompts.initial.as_deref(),
                 prompts.system.as_deref(),
                 true,
+                // The settings file rides every spawn (a restart or resume
+                // needs its hooks too); the launch flags only the first.
+                &[launch_flags, &settings_flag[..]].concat(),
             ),
         };
         // Run the agent through the user's login+interactive shell so it sees
@@ -2707,7 +2841,16 @@ impl Daemon {
                 };
                 tracing::info!(agent = %id, attach = %attach, "resume refused for a backgrounded session — attaching");
                 if self
-                    .spawn_agent_pty(&agent, &worktree, cols, rows, None, None, Some(&attach))
+                    .spawn_agent_pty(
+                        &agent,
+                        &worktree,
+                        cols,
+                        rows,
+                        None,
+                        None,
+                        Some(&attach),
+                        &[],
+                    )
                     .is_ok()
                 {
                     agent.alive = true;
@@ -3170,6 +3313,18 @@ fn relocation_prompt(relocate: bool, worktree: &Worktree) -> Option<String> {
     })
 }
 
+/// The refusal for a git-only operation on a PLAIN FOLDER project, naming
+/// what needs git (`worktrees`, `pull request sessions`).
+fn refuse_plain_folder(project: &Project, what: &str) -> Result<()> {
+    if project.plain_folder {
+        bail!(
+            "{} is a plain folder, not a git repository: {what} need git",
+            project.name
+        );
+    }
+    Ok(())
+}
+
 /// The checkout the test wrapper boots every spawn in.
 #[cfg(test)]
 const TEST_CWD: &str = "/nebula-test/p-feat";
@@ -3190,6 +3345,38 @@ fn agent_spawn_command_with(
     initial_prompt: Option<&str>,
     additional_system_prompt: Option<&str>,
     guidance: bool,
+) -> (String, Vec<String>, bool) {
+    agent_spawn_command_flagged(
+        harness,
+        session_id,
+        cwd,
+        model,
+        effort,
+        cmd_override,
+        initial_prompt,
+        additional_system_prompt,
+        guidance,
+        &[],
+    )
+}
+
+/// [`agent_spawn_command_with`] plus a create's LAUNCH FLAGS, already
+/// checked against `nebula_core::launch_flags`: they ride after the model
+/// and effort flags and before the system prompt and the trailing first
+/// prompt, as separate argv words. An override (tests) ignores them like
+/// every other flag.
+#[allow(clippy::too_many_arguments)]
+fn agent_spawn_command_flagged(
+    harness: &nebula_core::harness::HarnessDescriptor,
+    session_id: Option<&str>,
+    cwd: Option<&Path>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    cmd_override: Option<&str>,
+    initial_prompt: Option<&str>,
+    additional_system_prompt: Option<&str>,
+    guidance: bool,
+    launch_flags: &[String],
 ) -> (String, Vec<String>, bool) {
     if let Some(cmd) = cmd_override {
         let mut parts = cmd.split_whitespace().map(String::from).collect::<Vec<_>>();
@@ -3244,6 +3431,7 @@ fn agent_spawn_command_with(
             }
         }
     }
+    args.extend(launch_flags.iter().cloned());
     // Guidance (worktree rules, then the PR scope) rides the
     // system-prompt flag where one is mapped, folds into the first prompt
     // where prepend is, and is dropped where neither is.
@@ -4783,6 +4971,7 @@ mod tests {
             name: "demo".into(),
             repo_path: dir.path().to_path_buf(),
             sort_order: 0,
+            plain_folder: false,
         };
         daemon.store.insert_project(&project).unwrap();
         let worktree = Worktree {
@@ -4960,6 +5149,7 @@ mod tests {
                 starting_prompt: None,
                 pr_url: None,
                 issue_url: None,
+                launch_flags: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -4978,6 +5168,7 @@ mod tests {
                 starting_prompt: None,
                 pr_url: None,
                 issue_url: None,
+                launch_flags: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -4996,6 +5187,7 @@ mod tests {
                 starting_prompt: None,
                 pr_url: None,
                 issue_url: None,
+                launch_flags: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -5014,6 +5206,7 @@ mod tests {
                 starting_prompt: None,
                 pr_url: None,
                 issue_url: None,
+                launch_flags: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -5035,6 +5228,7 @@ mod tests {
             starting_prompt: None,
             pr_url: Some("https://github.com/o/r/pull/7".into()),
             issue_url: None,
+            launch_flags: Vec::new(),
         };
         for kind in AgentKind::ALL {
             if kind == AgentKind::Custom {
@@ -5199,6 +5393,7 @@ mod tests {
             starting_prompt: Some("Fix it".into()),
             pr_url: None,
             issue_url: Some("https://github.com/o/r/issues/15".into()),
+            launch_flags: Vec::new(),
         };
         for kind in AgentKind::ALL {
             if kind == AgentKind::Custom {
@@ -5243,6 +5438,7 @@ mod tests {
             starting_prompt: starting.map(String::from),
             pr_url: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         };
         // Validation runs before the worktree lookup, so an unknown
         // worktree is fine here and every failure is the prompt's own.
@@ -5292,6 +5488,122 @@ mod tests {
         assert!(
             daemon.prewarmed.lock().unwrap().contains_key(&key),
             "a starting-prompt create must not adopt the warm spare"
+        );
+    }
+
+    /// LAUNCH FLAGS are checked against the harness's allowlist before
+    /// anything else runs, refused beside a Cloud task, and — riding the
+    /// CLI's argv like a starting prompt — never adopt a warm spare.
+    #[tokio::test]
+    async fn launch_flags_are_allowlisted_and_never_adopt_a_warm_cli() {
+        let daemon = test_daemon();
+        let spec = |kind: AgentKind, cloud: Option<&str>, flags: &[&str]| CreateAgentSpec {
+            worktree: WorktreeId("unused".into()),
+            name: "plan".into(),
+            kind,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            auto_title: true,
+            cloud_prompt: cloud.map(String::from),
+            starting_prompt: None,
+            pr_url: None,
+            issue_url: None,
+            launch_flags: flags.iter().map(|f| f.to_string()).collect(),
+        };
+        for (kind, cloud, flags, needle) in [
+            (
+                AgentKind::Codex,
+                None,
+                &["--permission-mode", "plan"][..],
+                "not supported",
+            ),
+            (
+                AgentKind::Claude,
+                None,
+                &["--dangerously-skip-permissions"],
+                "not allowed",
+            ),
+            (
+                AgentKind::Claude,
+                None,
+                &["--permission-mode", "bypassPermissions"],
+                "does not take",
+            ),
+            (
+                AgentKind::Claude,
+                Some("Fix auth"),
+                &["--permission-mode", "plan"],
+                "not supported for Claude Cloud",
+            ),
+        ] {
+            let err = daemon
+                .create_agent(spec(kind, cloud, flags))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains(needle),
+                "{kind:?} {flags:?}: {err}"
+            );
+        }
+        assert!(
+            daemon.store.load_tree().unwrap().2.is_empty(),
+            "no refused create leaves a row behind"
+        );
+
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "w1", "/tmp", true);
+        let key = (WorktreeId("w1".into()), AgentKind::Claude);
+        daemon.prewarmed.lock().unwrap().insert(
+            key.clone(),
+            PrewarmEntry {
+                agent_id: AgentId("warm-1".into()),
+                spawned_at: Instant::now(),
+                model: None,
+                effort: None,
+                buffered_hooks: Vec::new(),
+            },
+        );
+        let mut plan = spec(AgentKind::Claude, None, &["--permission-mode=plan"]);
+        plan.worktree = WorktreeId("w1".into());
+        // As above: the cold path may fail at the CLI probe on this box.
+        let _ = daemon.create_agent(plan).await;
+        assert!(
+            daemon.prewarmed.lock().unwrap().contains_key(&key),
+            "a create with launch flags must not adopt the warm spare"
+        );
+    }
+
+    /// Validated LAUNCH FLAGS ride Claude's argv as their own words, after
+    /// the model and effort and ahead of the system prompt and the
+    /// trailing first prompt; a plain spawn carries none.
+    #[test]
+    fn launch_flags_ride_the_argv_ahead_of_the_prompts() {
+        let all = test_registry();
+        let claude = test_harness(&all, AgentKind::Claude);
+        let flags = nebula_core::launch_flags::plan_mode();
+        let (program, args, resumed) = agent_spawn_command_flagged(
+            &claude,
+            None,
+            Some(Path::new(TEST_CWD)),
+            Some("opus"),
+            None,
+            None,
+            Some("Fix auth"),
+            None,
+            true,
+            &flags,
+        );
+        assert_eq!(program, "claude");
+        assert!(!resumed);
+        assert_eq!(&args[..4], ["--model", "opus", "--permission-mode", "plan"]);
+        assert_eq!(args[4], "--append-system-prompt");
+        assert_eq!(args.last().map(String::as_str), Some("Fix auth"));
+
+        let (_, plain, _) = agent_spawn_command(AgentKind::Claude, None, None, None, None);
+        assert!(
+            !plain.iter().any(|a| a == "--permission-mode"),
+            "a restart or resume boots without them: {plain:?}"
         );
     }
 
@@ -5351,6 +5663,7 @@ mod tests {
             starting_prompt: task.map(String::from),
             pr_url: None,
             issue_url: None,
+            launch_flags: Vec::new(),
         };
 
         let created = |mut events: broadcast::Receiver<ServerEvent>| {
@@ -5441,6 +5754,7 @@ mod tests {
                     name: (*name).into(),
                     repo_path: format!("/tmp/{name}").into(),
                     sort_order: i as i64,
+                    plain_folder: false,
                 })
                 .unwrap();
         }
@@ -5614,6 +5928,7 @@ mod tests {
                 starting_prompt: None,
                 pr_url: None,
                 issue_url: None,
+                launch_flags: Vec::new(),
             })
             .await
             .unwrap()
@@ -5715,6 +6030,7 @@ mod tests {
                 name: "p".into(),
                 repo_path: repo.clone(),
                 sort_order: 0,
+                plain_folder: false,
             })
             .unwrap();
         seed_worktree(&daemon, "p", "root", &repo.to_string_lossy(), true);
@@ -5885,6 +6201,7 @@ mod tests {
             name: "p".into(),
             repo_path: repo.clone(),
             sort_order: 0,
+            plain_folder: false,
         };
         daemon.store.insert_project(&project).unwrap();
         seed_worktree(&daemon, "p", "root", &repo.to_string_lossy(), true);
@@ -5997,6 +6314,96 @@ mod tests {
         assert_eq!(project.folder_subtitle(), None, "nothing left to show");
     }
 
+    /// A PLAIN FOLDER project: a folder outside any repository, added when
+    /// the client asks for one, is never `git init`ed. It gets one root
+    /// row with no branch, the worktree sync leaves it alone, and the
+    /// git-only operations refuse it with a reason. Without the flag the
+    /// same folder is refused as before, and with it a folder inside a
+    /// repository is still that repository's project.
+    #[tokio::test]
+    async fn a_plain_folder_project_needs_no_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let home = root.join("home");
+        std::fs::create_dir(&home).unwrap();
+        let daemon = test_daemon();
+
+        let refused = daemon.add_project(&home, None, false).await.unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("not a git repository"),
+            "{refused:#}"
+        );
+
+        let id = match daemon
+            .add_project_with(&home, None, false, true)
+            .await
+            .unwrap()
+        {
+            EntityId::Project(id) => id,
+            other => panic!("expected a project id, got {other:?}"),
+        };
+        assert!(!home.join(".git").exists(), "nothing was git-inited");
+        let (projects, worktrees, _, _) = daemon.store.load_tree().unwrap();
+        let project = projects.iter().find(|p| p.id == id).unwrap();
+        assert!(project.plain_folder, "stored as a plain folder");
+        assert_eq!(project.repo_path, home);
+        assert_eq!(project.name, "home");
+        let rows: Vec<&Worktree> = worktrees.iter().filter(|w| w.project_id == id).collect();
+        assert_eq!(rows.len(), 1, "one root row: {rows:#?}");
+        assert!(rows[0].is_main);
+        assert_eq!(rows[0].path, home);
+        assert_eq!(rows[0].branch, "", "no branch to show");
+
+        // The sync has no git to ask, and must not drop the root row.
+        daemon.sync_project_worktrees(project).await.unwrap();
+        let (_, after, _, _) = daemon.store.load_tree().unwrap();
+        assert_eq!(after.iter().filter(|w| w.project_id == id).count(), 1);
+
+        let err = daemon.create_worktree(&id, "feat", None).await.unwrap_err();
+        assert!(err.to_string().contains("plain folder"), "{err}");
+        let err = daemon.pr_worktree(&id, 7, "feat").await.unwrap_err();
+        assert!(err.to_string().contains("plain folder"), "{err}");
+
+        let dup = daemon
+            .add_project_with(&home, None, false, true)
+            .await
+            .unwrap_err();
+        assert!(dup.to_string().contains("already added"), "{dup}");
+
+        // A missing folder is made when the client also confirmed that,
+        // still without git.
+        let fresh = root.join("notes");
+        daemon
+            .add_project_with(&fresh, Some("Notes".into()), true, true)
+            .await
+            .unwrap();
+        assert!(fresh.is_dir() && !fresh.join(".git").exists());
+        let missing = daemon
+            .add_project_with(&root.join("nowhere"), None, false, true)
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("does not exist"), "{missing}");
+
+        // Inside a repository the flag changes nothing.
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_in(&repo, &["init", "-b", "main"]);
+        git_in(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        let repo_id = match daemon
+            .add_project_with(&repo, None, false, true)
+            .await
+            .unwrap()
+        {
+            EntityId::Project(id) => id,
+            other => panic!("expected a project id, got {other:?}"),
+        };
+        let repo_project = daemon.store.get_project(&repo_id).unwrap().unwrap();
+        assert!(!repo_project.plain_folder, "a repository is never plain");
+        let (_, worktrees, _, _) = daemon.store.load_tree().unwrap();
+        let repo_root = worktrees.iter().find(|w| w.project_id == repo_id).unwrap();
+        assert_eq!(repo_root.branch, "main");
+    }
+
     /// `git rev-parse --show-toplevel` answers with the checkout it ran in, so
     /// `nebula add .` from inside a linked worktree used to make the worktree
     /// the project: named after the branch directory, `repo_path` pointing at
@@ -6094,6 +6501,7 @@ mod tests {
             name: "p".into(),
             repo_path: repo.clone(),
             sort_order: 0,
+            plain_folder: false,
         };
         daemon.store.insert_project(&project).unwrap();
         // The wrong way round: the linked checkout wears the root badge and
@@ -6129,6 +6537,7 @@ mod tests {
             name: "p".into(),
             repo_path: repo.clone(),
             sort_order: 0,
+            plain_folder: false,
         };
         daemon.store.insert_project(&project).unwrap();
         seed_worktree(&daemon, "p", "rt", &repo.to_string_lossy(), true);
@@ -6175,6 +6584,7 @@ mod tests {
             name: "p".into(),
             repo_path: repo.to_path_buf(),
             sort_order: 0,
+            plain_folder: false,
         };
         daemon.store.insert_project(&project).unwrap();
         seed_worktree(daemon, "p", "rt", &repo.to_string_lossy(), true);

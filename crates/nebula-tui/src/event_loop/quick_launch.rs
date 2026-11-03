@@ -665,6 +665,7 @@ mod tests {
                         name: "web".into(),
                         repo_path: "/tmp/web".into(),
                         sort_order: 1,
+                        plain_folder: false,
                     }),
                 },
             );

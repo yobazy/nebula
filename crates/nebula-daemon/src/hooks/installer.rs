@@ -213,6 +213,34 @@ pub fn install_claude_hooks(cwd: &Path) -> Result<()> {
     )
 }
 
+/// The nebula-owned settings file a PLAIN FOLDER project's Claude sessions
+/// load with `--settings`, under nebula's data dir:
+/// `<data dir>/plain-folders/<project id>/claude-settings.json`. A plain
+/// folder can be the user's own folder (Observatory's Home may be `~`
+/// itself, where `<folder>/.claude/settings.local.json` would be the user's
+/// global `~/.claude/settings.local.json`), so nebula keeps its hooks out
+/// of it. One file per project, removed with the project.
+pub fn plain_folder_settings_dir(data_dir: &Path, project_id: &str) -> PathBuf {
+    data_dir.join("plain-folders").join(project_id)
+}
+
+/// The settings file's name inside [`plain_folder_settings_dir`].
+pub const PLAIN_FOLDER_SETTINGS_FILE: &str = "claude-settings.json";
+
+/// [`install_claude_hooks`] for a PLAIN FOLDER: the same hooks and allow
+/// rules, merged into the nebula-owned settings file in `dir` instead of
+/// the folder's `.claude/`. Returns the file's path for `--settings`.
+pub fn install_claude_hooks_outside(dir: &Path) -> Result<PathBuf> {
+    install_managed_hooks(
+        dir,
+        PLAIN_FOLDER_SETTINGS_FILE,
+        "claude",
+        CLAUDE_EVENTS,
+        CLAUDE_ALLOW_RULES,
+    )?;
+    Ok(dir.join(PLAIN_FOLDER_SETTINGS_FILE))
+}
+
 /// Idempotently add one entry to `permissions.allow`, preserving everything
 /// the user put there. Same abort-don't-clobber policy as the hook merge.
 fn ensure_permission_allow(
@@ -549,6 +577,33 @@ mod tests {
         assert!(notification[0].get("matcher").is_none());
         let pre = &settings["hooks"]["PreToolUse"];
         assert_eq!(pre[0]["matcher"], json!("AskUserQuestion"));
+    }
+
+    /// A PLAIN FOLDER's hooks land in nebula's own settings file, with the
+    /// same hooks and allow rules as a worktree's, and nothing is written
+    /// into the folder. A reinstall (every spawn) keeps one group per hook.
+    #[test]
+    fn plain_folder_hooks_stay_out_of_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("home");
+        std::fs::create_dir(&folder).unwrap();
+        let dir = plain_folder_settings_dir(&tmp.path().join("data"), "p-1");
+        assert_eq!(dir, tmp.path().join("data/plain-folders/p-1"));
+
+        let path = install_claude_hooks_outside(&dir).unwrap();
+        install_claude_hooks_outside(&dir).unwrap();
+        assert_eq!(path, dir.join("claude-settings.json"));
+        assert!(!folder.join(".claude").exists(), "the folder is untouched");
+
+        let ours = read_json(&dir, "claude-settings.json");
+        let worktree = tempfile::tempdir().unwrap();
+        install_claude_hooks(worktree.path()).unwrap();
+        assert_eq!(
+            ours,
+            read_settings(worktree.path()),
+            "the same hooks and permissions a worktree gets"
+        );
+        assert_eq!(ours["hooks"]["Stop"].as_array().unwrap().len(), 1);
     }
 
     #[test]

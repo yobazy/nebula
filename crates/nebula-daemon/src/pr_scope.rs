@@ -303,6 +303,7 @@ impl Daemon {
             starting_prompt,
             pr_url: Some(pr_url),
             issue_url: None,
+            launch_flags: Vec::new(),
         })
         .await
     }
